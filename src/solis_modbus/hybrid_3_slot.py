@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar
 
-from modbus_connection.model import Component, enum
+from modbus_connection.model import enum
 
 from .enums import EnergyStorageMode3Slot
 from .hybrid import SolisHybrid
@@ -32,11 +32,9 @@ class SolisHybrid3Slot(SolisHybrid):
 
     commands_class: ClassVar[type[Commands]] = Commands3Slot
     mode_enum = EnergyStorageMode3Slot
+    schedule_polled: ClassVar[tuple[str, ...]] = ("schedule", "special_settings")
 
     def __init__(self, unit: ModbusUnit, variant: Variant | None = None) -> None:
         super().__init__(unit, variant)
         self.schedule = Schedule(unit)
         self.special_settings = SpecialSettings(unit)
-
-    def schedule_components(self) -> list[Component]:
-        return [self.schedule, self.special_settings]

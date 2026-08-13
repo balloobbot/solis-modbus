@@ -199,6 +199,7 @@ async def test_write_six_slot_voltage_is_range_checked() -> None:
 
 async def test_legacy_map_has_nothing_writable() -> None:
     _, device = build_legacy()
-    await device.async_update()
-    for component in device.polled_components:
+    report = await device.async_update()
+    for name in report.updated:
+        component = getattr(device, name)
         assert not any(f.writable for f in component.declared_fields.values())

@@ -27,6 +27,7 @@ from .hybrid import SolisHybrid
 from .hybrid_3_slot import SolisHybrid3Slot
 from .hybrid_6_slot import SolisHybrid6Slot
 from .legacy_3000 import SolisLegacy3000
+from .model import UpdateReport
 from .variants import (
     HYBRID_SERIAL_PREFIXES,
     LEGACY_SERIAL_PREFIXES,
@@ -50,6 +51,7 @@ __all__ = [
     "SolisHybrid6Slot",
     "SolisLegacy3000",
     "UnknownInverterError",
+    "UpdateReport",
     "Variant",
     "variant_from_serial",
 ]

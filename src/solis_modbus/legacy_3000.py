@@ -9,14 +9,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from modbus_connection import ModbusConnectionError, ModbusError
 from modbus_connection.model import (
     Component,
-    ComponentGroup,
     gauge,
     string,
     uint32,
 )
 
+from .model import UpdateReport
 from .variants import (
     LEGACY_SERIAL_PREFIXES,
     UnknownInverterError,
@@ -29,6 +30,10 @@ if TYPE_CHECKING:
 
 MAX_READ_SPAN = 48
 """Registers per read. The integration caps a legacy Solis block at 48."""
+
+# Every component attribute a poll refreshes, in read order. identity is read
+# once at setup and stays out.
+_POLLED = ("generation", "pv", "ac_output")
 
 
 class LegacyInput(Component):
@@ -111,10 +116,15 @@ class SolisLegacy3000:
         self.pv = LegacyPvStrings(unit)
 
         self.ac_output: LegacyAcOutput | None = None
-        self._group: ComponentGroup | None = None
+        self._polled: list[str] | None = None
 
     async def async_setup(self) -> None:
-        """Read the serial number and settle whether this is X1 or X3."""
+        """Read the serial number and settle whether this is X1 or X3.
+
+        Run by the first :meth:`async_update` if the caller does not run it
+        itself. A failure leaves the inverter unset up, so the next update
+        retries.
+        """
         await self.identity.async_update()
         variant = self._declared_variant or variant_from_serial(
             self.identity.serial_number, LEGACY_SERIAL_PREFIXES
@@ -129,21 +139,33 @@ class SolisLegacy3000:
             if variant & Variant.X1
             else LegacyThreePhaseAcOutput(self._unit)
         )
-        self._group = ComponentGroup(self._unit, self.polled_components)
+        # Doubles as the setup marker: None means setup still has to run.
+        self._polled = [name for name in _POLLED if getattr(self, name) is not None]
 
-    @property
-    def polled_components(self) -> list[Component]:
-        """Every component ``async_update()`` refreshes."""
-        components: list[Component | None] = [
-            self.generation,
-            self.pv,
-            self.ac_output,
-        ]
-        return [c for c in components if c is not None]
+    async def async_update(self) -> UpdateReport:
+        """Refresh every polled component, one at a time.
 
-    async def async_update(self) -> None:
-        """Refresh every polled component; the first call sets the inverter up."""
-        if self._group is None:
+        Same contract as :meth:`solis_modbus.SolisHybrid.async_update`: a failed
+        component keeps its previous values and is reported, listeners fire after
+        the whole poll and only for refreshed components, and a dead link raises
+        ``ModbusConnectionError``.
+        """
+        if self._polled is None:
             await self.async_setup()
-        assert self._group is not None
-        await self._group.async_update()
+        assert self._polled is not None  # async_setup() builds it
+        updated: set[str] = set()
+        failed: dict[str, ModbusError] = {}
+        for name in self._polled:
+            component: Component = getattr(self, name)
+            try:
+                await component.async_update(notify=False)
+            except ModbusConnectionError:
+                raise
+            except ModbusError as err:
+                failed[name] = err
+            else:
+                updated.add(name)
+        for name in updated:
+            fresh: Component = getattr(self, name)
+            fresh.notify()
+        return UpdateReport(updated, failed)

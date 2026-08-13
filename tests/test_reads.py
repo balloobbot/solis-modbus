@@ -10,11 +10,16 @@ from __future__ import annotations
 from modbus_connection.mock import MockModbusUnit
 from modbus_connection.model import Component
 
-from solis_modbus import Variant
+from solis_modbus import UpdateReport, Variant
 from solis_modbus.legacy_3000 import MAX_READ_SPAN as LEGACY_MAX_SPAN
 from solis_modbus.telemetry import MAX_READ_SPAN
 
 from .conftest import build_hybrid_3_slot, build_hybrid_6_slot, build_legacy
+
+
+def polled(device: object, report: UpdateReport) -> list[Component]:
+    """The components the poll refreshed, by the report's attribute names."""
+    return [getattr(device, name) for name in report.updated]
 
 
 def field_addresses(components: list[Component]) -> set[tuple[str, int]]:
@@ -47,16 +52,16 @@ def read_addresses(unit: MockModbusUnit) -> set[tuple[str, int]]:
 
 async def test_three_slot_x1_poll_is_correct() -> None:
     unit, device = build_hybrid_3_slot()
-    await device.async_update()
+    report = await device.async_update()
 
     covered = read_addresses(unit)
-    assert field_addresses(device.polled_components) <= covered
+    assert field_addresses(polled(device, report)) <= covered
     assert all(event.count <= MAX_READ_SPAN for event in unit.read_events)
     assert {event.register_type for event in unit.read_events} == {"input", "holding"}
 
     # An X1 inverter has two PV strings and its own battery current limits.
     assert ("input", 33206) in covered
-    fields = field_addresses(device.polled_components)
+    fields = field_addresses(polled(device, report))
     assert ("input", 33053) not in fields  # string 3 belongs to MPPT3/MPPT4
     assert ("input", 33055) not in fields  # string 4 belongs to MPPT4
     # The strings 1-2 block still spans them, as the integration's does: the
@@ -77,7 +82,12 @@ async def test_three_slot_x1_poll_shape() -> None:
         ("input", 33049, 10),  # PV strings 1-2 and the total
         ("input", 33073, 12),  # AC output
         ("input", 33093, 3),  # temperature, frequency, status
-        ("input", 33126, 25),  # inverter meter and battery
+        # The inverter meter and the battery are separate components, so they
+        # are separate reads: pooling used to merge them into one 33126+25.
+        # Same 25 registers either way, one request more, one failure domain
+        # each — a refused battery block no longer blanks the meter.
+        ("input", 33126, 6),  # inverter meter, exactly 33126-33131
+        ("input", 33132, 19),  # battery, 33132-33150, bridging its two holes
         ("input", 33161, 20),  # energy counters
         ("input", 33206, 2),  # battery current limits (X1 only)
         ("input", 33251, 36),  # external meter
@@ -91,11 +101,11 @@ async def test_three_slot_x1_poll_shape() -> None:
 
 async def test_three_slot_x3_mppt4_poll_is_correct() -> None:
     unit, device = build_hybrid_3_slot("1033050123456789")
-    await device.async_update()
+    report = await device.async_update()
     assert device.variant == Variant.X3 | Variant.MPPT4
 
     covered = read_addresses(unit)
-    assert field_addresses(device.polled_components) <= covered
+    assert field_addresses(polled(device, report)) <= covered
     assert all(event.count <= MAX_READ_SPAN for event in unit.read_events)
 
     # Four PV strings, three phases, and no X1-only battery current limits.
@@ -107,10 +117,10 @@ async def test_three_slot_x3_mppt4_poll_is_correct() -> None:
 
 async def test_six_slot_poll_is_correct() -> None:
     unit, device = build_hybrid_6_slot()
-    await device.async_update()
+    report = await device.async_update()
 
     covered = read_addresses(unit)
-    assert field_addresses(device.polled_components) <= covered
+    assert field_addresses(polled(device, report)) <= covered
     assert all(event.count <= MAX_READ_SPAN for event in unit.read_events)
 
     # The extended schedule is read; the three-slot block is not on this firmware.
@@ -135,10 +145,10 @@ async def test_six_slot_schedule_splits_at_the_read_limit() -> None:
 
 async def test_legacy_poll_is_correct() -> None:
     unit, device = build_legacy()
-    await device.async_update()
+    report = await device.async_update()
 
     covered = read_addresses(unit)
-    assert field_addresses(device.polled_components) <= covered
+    assert field_addresses(polled(device, report)) <= covered
     assert all(event.count <= LEGACY_MAX_SPAN for event in unit.read_events)
     # The legacy map is input registers only: nothing here is writable.
     assert {event.register_type for event in unit.read_events} == {"input"}

@@ -10,8 +10,10 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import TYPE_CHECKING, ClassVar
 
-from modbus_connection.model import Component, ComponentGroup
+from modbus_connection import ModbusConnectionError, ModbusError
+from modbus_connection.model import Component
 
+from .model import UpdateReport
 from .settings import (
     Commands,
     Settings,
@@ -47,6 +49,24 @@ from .variants import (
 if TYPE_CHECKING:
     from modbus_connection import ModbusUnit
 
+# Every shared component attribute a poll may refresh, in read order — which is
+# ascending register order, so a poll still walks the map front to back. Each
+# variant adds its own schedule attributes; identity is read once at setup and
+# commands are write-only, so neither is here.
+_POLLED = (
+    "clock",
+    "generation",
+    "pv",
+    "ac_output",
+    "status",
+    "inverter_meter",
+    "battery",
+    "energy",
+    "battery_current_limits",
+    "external_meter",
+    "settings",
+)
+
 
 class SolisHybrid:
     """A Solis hybrid inverter on the 33xxx/43xxx register map.
@@ -58,6 +78,8 @@ class SolisHybrid:
 
     commands_class: ClassVar[type[Commands]] = Commands
     mode_enum: ClassVar[type[IntEnum]]
+    schedule_polled: ClassVar[tuple[str, ...]]
+    """The variant's schedule attributes, polled after the shared ones."""
 
     def __init__(self, unit: ModbusUnit, variant: Variant | None = None) -> None:
         self._unit = unit
@@ -80,7 +102,7 @@ class SolisHybrid:
         self.external_meter: ExternalMeter | None = None
         self.battery_current_limits: BatteryCurrentLimits | None = None
 
-        self._group: ComponentGroup | None = None
+        self._polled: list[str] | None = None
 
     @property
     def storage_mode(self) -> IntEnum | None:
@@ -93,12 +115,13 @@ class SolisHybrid:
         except ValueError:
             return None
 
-    def schedule_components(self) -> list[Component]:
-        """The variant's schedule components, polled with everything else."""
-        raise NotImplementedError
-
     async def async_setup(self) -> None:
-        """Read the serial number and build this inverter's components."""
+        """Read the serial number and build this inverter's components.
+
+        Run by the first :meth:`async_update` if the caller does not run it
+        itself. A failure leaves the inverter unset up, so the next update
+        retries.
+        """
         await self.identity.async_update()
         variant = self._declared_variant or variant_from_serial(
             self.identity.serial_number, HYBRID_SERIAL_PREFIXES
@@ -137,30 +160,38 @@ class SolisHybrid:
             BatteryCurrentLimits(self._unit) if single_phase else None
         )
 
-        self._group = ComponentGroup(self._unit, self.polled_components)
-
-    @property
-    def polled_components(self) -> list[Component]:
-        """Every component ``async_update()`` refreshes."""
-        components: list[Component | None] = [
-            self.clock,
-            self.generation,
-            self.pv,
-            self.ac_output,
-            self.status,
-            self.inverter_meter,
-            self.battery,
-            self.battery_current_limits,
-            self.energy,
-            self.external_meter,
-            self.settings,
-            *self.schedule_components(),
+        # Doubles as the setup marker: None means setup still has to run.
+        self._polled = [
+            name
+            for name in (*_POLLED, *self.schedule_polled)
+            if getattr(self, name) is not None
         ]
-        return [c for c in components if c is not None]
 
-    async def async_update(self) -> None:
-        """Refresh every polled component; the first call sets the inverter up."""
-        if self._group is None:
+    async def async_update(self) -> UpdateReport:
+        """Refresh every component this variant serves, one at a time.
+
+        Components are read independently, the way the integration reads its
+        blocks: a component whose read fails keeps its previous values while the
+        rest still refresh. Listeners fire only after every component has been
+        tried, and only on the ones that refreshed. A failure of the link itself
+        raises ``ModbusConnectionError`` instead of reporting.
+        """
+        if self._polled is None:
             await self.async_setup()
-        assert self._group is not None
-        await self._group.async_update()
+        assert self._polled is not None  # async_setup() builds it
+        updated: set[str] = set()
+        failed: dict[str, ModbusError] = {}
+        for name in self._polled:
+            component: Component = getattr(self, name)
+            try:
+                await component.async_update(notify=False)
+            except ModbusConnectionError:
+                raise
+            except ModbusError as err:
+                failed[name] = err
+            else:
+                updated.add(name)
+        for name in updated:
+            fresh: Component = getattr(self, name)
+            fresh.notify()
+        return UpdateReport(updated, failed)
