@@ -1,0 +1,114 @@
+"""One failing block must not take the rest of the poll with it.
+
+The integration reads its blocks independently and tolerates a failure: the
+failing block's sensors keep their last values while everything else refreshes.
+The library mirrors that at component granularity.
+"""
+
+from __future__ import annotations
+
+import pytest
+from modbus_connection import ModbusConnectionError, ModbusTimeoutError
+
+from solis_modbus import SolisHybrid3Slot, UnknownInverterError
+
+from .conftest import build_hybrid_3_slot, build_legacy
+
+
+async def test_a_failed_component_leaves_the_rest_fresh() -> None:
+    unit, device = build_hybrid_3_slot()
+    await device.async_update()
+    before = device.battery.battery_voltage
+
+    unit.input[33128] = 2400  # meter voltage changes on the device -> 240.0 V
+    unit.input[33133] = 530  # so does battery voltage -> 53.0 V
+    unit.fail_read(
+        33132, ModbusTimeoutError("slow battery block"), register_type="input"
+    )
+    report = await device.async_update()
+
+    assert not report.complete
+    assert set(report.failed) == {"battery"}
+    assert isinstance(report.failed["battery"], ModbusTimeoutError)
+    assert "inverter_meter" in report.updated
+    assert device.inverter_meter.meter_voltage == 240.0
+    assert device.battery.battery_voltage == before  # previous value kept
+
+
+async def test_listeners_fire_at_the_end_and_only_for_fresh_components() -> None:
+    unit, device = build_hybrid_3_slot()
+    await device.async_update()
+    seen: list[int] = []
+    # energy is polled before external_meter and the schedule, so a listener
+    # firing mid-poll would see fewer reads than the poll's final count.
+    device.energy.add_update_listener(lambda: seen.append(len(unit.read_events)))
+    device.battery.add_update_listener(lambda: seen.append(-1))
+
+    unit.fail_read(
+        33132, ModbusTimeoutError("slow battery block"), register_type="input"
+    )
+    unit.read_events.clear()
+    await device.async_update()
+
+    # One notification, after every component was tried; none for the failure.
+    assert seen == [len(unit.read_events)]
+
+
+async def test_a_dead_link_raises_instead_of_reporting() -> None:
+    unit, device = build_hybrid_3_slot()
+    await device.async_update()
+    unit.fail_requests(ModbusConnectionError("link down"))
+    with pytest.raises(ModbusConnectionError):
+        await device.async_update()
+
+
+async def test_every_component_refreshes_on_a_healthy_device() -> None:
+    _, device = build_hybrid_3_slot()
+    report = await device.async_update()
+
+    assert report.complete
+    assert report.failed == {}
+    assert {"clock", "battery", "inverter_meter", "settings", "schedule"} <= (
+        report.updated
+    )
+    # Identity is settled at setup and commands are write-only: neither is polled.
+    assert "identity" not in report.updated
+    assert "commands" not in report.updated
+
+
+async def test_legacy_containment_matches_the_hybrid_contract() -> None:
+    unit, device = build_legacy()
+    await device.async_update()
+
+    unit.input[3015] = 95  # generation today changes -> 9.5 kWh
+    unit.fail_read(3022, ModbusTimeoutError("slow PV block"), register_type="input")
+    report = await device.async_update()
+
+    assert set(report.failed) == {"pv"}
+    assert device.generation.power_generation_today == 9.5
+    assert device.pv.pv_voltage_1 == 320.1  # previous value kept
+
+
+async def test_a_failed_setup_raises_and_the_next_update_retries() -> None:
+    """Identity is the poll's foundation; without it there is nothing partial."""
+    unit, device = build_hybrid_3_slot()
+    unit.fail_read(33004, ModbusTimeoutError("no serial"), register_type="input")
+
+    with pytest.raises(ModbusTimeoutError):
+        await device.async_update()
+    assert device.variant is None
+
+    unit.fail_read(33004, None, register_type="input")
+    assert (await device.async_update()).complete
+
+
+async def test_an_unknown_serial_is_not_swallowed_by_the_containment() -> None:
+    """Setup errors are not per-component failures and must keep surfacing."""
+    unit, device = build_hybrid_3_slot("9999999999999999")
+
+    for _ in range(2):  # permanent, not a transient one-poll failure
+        with pytest.raises(UnknownInverterError):
+            await device.async_update()
+
+    assert isinstance(device, SolisHybrid3Slot)
+    assert unit.read_events  # the serial was actually attempted
