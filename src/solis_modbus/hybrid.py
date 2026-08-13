@@ -11,7 +11,7 @@ from enum import IntEnum
 from typing import TYPE_CHECKING, ClassVar
 
 from modbus_connection import ModbusConnectionError, ModbusError
-from modbus_connection.model import Component
+from modbus_connection.model import Component, ComponentGroup
 
 from .model import UpdateReport
 from .settings import (
@@ -195,3 +195,20 @@ class SolisHybrid:
             fresh: Component = getattr(self, name)
             fresh.notify()
         return UpdateReport(updated, failed)
+
+    async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
+        """Every register this inverter reads, undecoded — for diagnostics.
+
+        Covers ``identity``, which only setup reads, as well as the polled
+        components, so a dump carries the serial number an issue report needs.
+        Left out is ``commands``: those registers are written, never read. The
+        first call sets the inverter up.
+        """
+        if self._polled is None:
+            await self.async_setup()
+        assert self._polled is not None  # async_setup() builds it
+        components: list[Component] = [
+            self.identity,
+            *(getattr(self, name) for name in self._polled),
+        ]
+        return await ComponentGroup(self._unit, components).async_read_raw()

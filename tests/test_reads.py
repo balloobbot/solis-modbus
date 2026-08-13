@@ -187,3 +187,26 @@ async def test_write_only_registers_are_never_polled() -> None:
     covered = read_addresses(unit)
     for address in (43000, 43005, 43110, 43129, 43135, 43136):
         assert ("holding", address) not in covered
+
+
+async def test_raw_dump_covers_the_setup_only_identity() -> None:
+    """A diagnostic dump carries the serial number the poll never re-reads."""
+    device = build_hybrid_3_slot()[1]
+    report = await device.async_update()
+
+    raw = await device.async_read_raw()
+    dumped = {(space, address) for space, values in raw.items() for address in values}
+    assert ("input", 33004) in dumped
+    assert field_addresses([device.identity, *polled(device, report)]) <= dumped
+    for address in (43000, 43005, 43110, 43129, 43135, 43136):
+        assert ("holding", address) not in dumped  # write-only, never read
+
+
+async def test_legacy_raw_dump_covers_the_setup_only_identity() -> None:
+    device = build_legacy()[1]
+    report = await device.async_update()
+
+    raw = await device.async_read_raw()
+    dumped = {(space, address) for space, values in raw.items() for address in values}
+    assert ("input", 3061) in dumped
+    assert field_addresses([device.identity, *polled(device, report)]) <= dumped

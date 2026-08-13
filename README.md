@@ -137,6 +137,10 @@ Containment is per component, so a component's own registers are still
 all-or-nothing: `settings` covers three separate holding blocks, and the
 six-slot `schedule` covers three reads of 43707-43791, each failing as a unit.
 
+For an issue report, `async_read_raw()` dumps every register the inverter reads
+undecoded, keyed by address space and address. It covers the serial number as
+well, which only setup reads; the write-only command registers stay out.
+
 ## Field names
 
 Field names are the integration's entity keys, so a mapping lifted from there
