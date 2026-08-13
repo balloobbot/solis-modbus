@@ -20,9 +20,9 @@ inverter.
   usual RS485 gateways do not speak Modbus ASCII over TCP, and the integration's
   ASCII affordance is deliberately not carried over.
 - **Setup once, then poll.** The first `async_update()` reads the serial number,
-  settles which variant the inverter is, builds only the components that variant
-  serves, and pools them into one `ComponentGroup`. Later polls are a single
-  pooled set of block reads.
+  settles which variant the inverter is, and builds only the components that
+  variant serves. Later polls read each of those components in turn. A setup
+  that fails leaves the inverter unset up, so the next poll retries it.
 - Reads are capped at the width the integration uses for Solis — 40 registers
   (48 on the legacy map). No readable address ranges are declared, because the
   integration does not know any: it forms blocks purely by that width, so gap
@@ -119,6 +119,23 @@ asyncio.run(main())
 
 Each sub-system is an independently updatable `Component` with its own update
 listeners, so a consumer can refresh or subscribe to just the part it shows.
+
+A poll reads each sub-system independently, the way the integration reads its
+blocks: one slow or refused block does not take the rest of the poll with it.
+`async_update()` returns an `UpdateReport` — a failed component keeps its
+previous values, does not notify its listeners, and is listed by attribute name
+with its error, while every other component refreshes and notifies once the
+whole poll is done. Only a dead link (`ModbusConnectionError`) raises:
+
+```python
+report = await inverter.async_update()
+for name, error in report.failed.items():
+    print(f"{name} kept its previous values: {error}")
+```
+
+Containment is per component, so a component's own registers are still
+all-or-nothing: `settings` covers three separate holding blocks, and the
+six-slot `schedule` covers three reads of 43707-43791, each failing as a unit.
 
 ## Field names
 
