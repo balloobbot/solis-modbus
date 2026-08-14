@@ -10,7 +10,7 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import TYPE_CHECKING, ClassVar
 
-from modbus_connection import ModbusConnectionError, ModbusError
+from modbus_connection import ModbusConnectionError, ModbusError, ModbusTimeoutError
 from modbus_connection.model import Component, ComponentGroup
 
 from .model import UpdateReport
@@ -174,7 +174,9 @@ class SolisHybrid:
         blocks: a component whose read fails keeps its previous values while the
         rest still refresh. Listeners fire only after every component has been
         tried, and only on the ones that refreshed. A failure of the link itself
-        raises ``ModbusConnectionError`` instead of reporting.
+        raises ``ModbusConnectionError`` instead of reporting, and so does a
+        timeout before anything has answered: a silent inverter is not walked
+        component by component, paying a timeout for each.
         """
         if self._polled is None:
             await self.async_setup()
@@ -187,6 +189,10 @@ class SolisHybrid:
                 await component.async_update(notify=False)
             except ModbusConnectionError:
                 raise
+            except ModbusTimeoutError as err:
+                if not updated and not failed:
+                    raise  # nothing answered at all: assume the rest time out too
+                failed[name] = err
             except ModbusError as err:
                 failed[name] = err
             else:

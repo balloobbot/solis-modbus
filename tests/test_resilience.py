@@ -8,7 +8,11 @@ The library mirrors that at component granularity.
 from __future__ import annotations
 
 import pytest
-from modbus_connection import ModbusConnectionError, ModbusTimeoutError
+from modbus_connection import (
+    IllegalDataAddressError,
+    ModbusConnectionError,
+    ModbusTimeoutError,
+)
 
 from solis_modbus import SolisHybrid3Slot, UnknownInverterError
 
@@ -100,6 +104,44 @@ async def test_a_failed_setup_raises_and_the_next_update_retries() -> None:
 
     unit.fail_read(33004, None, register_type="input")
     assert (await device.async_update()).complete
+
+
+async def test_a_timeout_with_nothing_answered_is_fatal() -> None:
+    """A silent inverter must cost one timeout, not one per component."""
+    unit, device = build_hybrid_3_slot()
+    await device.async_update()
+
+    unit.fail_read(33022, ModbusTimeoutError("inverter asleep"), register_type="input")
+    unit.read_events.clear()
+    with pytest.raises(ModbusTimeoutError):
+        await device.async_update()
+
+    # The first component is the probe: the poll gave up instead of walking on.
+    assert len(unit.read_events) == 1
+
+
+async def test_a_refusal_on_the_first_component_is_still_contained() -> None:
+    """An exception response proves the inverter is there, so the poll goes on."""
+    unit, device = build_hybrid_3_slot()
+    await device.async_update()
+
+    unit.fail_read(33022, IllegalDataAddressError(), register_type="input")
+    report = await device.async_update()
+
+    assert set(report.failed) == {"clock"}
+    assert "battery" in report.updated
+
+
+async def test_legacy_fatal_timeout_matches_the_hybrid_contract() -> None:
+    unit, device = build_legacy()
+    await device.async_update()
+
+    unit.fail_read(3005, ModbusTimeoutError("inverter asleep"), register_type="input")
+    unit.read_events.clear()
+    with pytest.raises(ModbusTimeoutError):
+        await device.async_update()
+
+    assert len(unit.read_events) == 1
 
 
 async def test_an_unknown_serial_is_not_swallowed_by_the_containment() -> None:

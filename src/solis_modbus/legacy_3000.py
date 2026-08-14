@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from modbus_connection import ModbusConnectionError, ModbusError
+from modbus_connection import ModbusConnectionError, ModbusError, ModbusTimeoutError
 from modbus_connection.model import (
     Component,
     ComponentGroup,
@@ -149,7 +149,7 @@ class SolisLegacy3000:
         Same contract as :meth:`solis_modbus.SolisHybrid.async_update`: a failed
         component keeps its previous values and is reported, listeners fire after
         the whole poll and only for refreshed components, and a dead link raises
-        ``ModbusConnectionError``.
+        ``ModbusConnectionError`` — as does a timeout before anything answered.
         """
         if self._polled is None:
             await self.async_setup()
@@ -162,6 +162,10 @@ class SolisLegacy3000:
                 await component.async_update(notify=False)
             except ModbusConnectionError:
                 raise
+            except ModbusTimeoutError as err:
+                if not updated and not failed:
+                    raise  # nothing answered at all: assume the rest time out too
+                failed[name] = err
             except ModbusError as err:
                 failed[name] = err
             else:
