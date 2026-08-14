@@ -175,7 +175,8 @@ class SolisLegacy3000:
         """Every register this inverter reads, undecoded — for diagnostics.
 
         Covers ``identity``, which only setup reads, as well as the polled
-        components. The first call sets the inverter up.
+        components. Nothing notifies: a download is not a poll. The first call
+        sets the inverter up.
         """
         if self._polled is None:
             await self.async_setup()
@@ -184,4 +185,4 @@ class SolisLegacy3000:
             self.identity,
             *(getattr(self, name) for name in self._polled),
         ]
-        return await ComponentGroup(self._unit, components).async_read_raw()
+        return await ComponentGroup(self._unit, components).async_read_raw(notify=False)

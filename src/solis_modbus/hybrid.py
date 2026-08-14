@@ -201,8 +201,9 @@ class SolisHybrid:
 
         Covers ``identity``, which only setup reads, as well as the polled
         components, so a dump carries the serial number an issue report needs.
-        Left out is ``commands``: those registers are written, never read. The
-        first call sets the inverter up.
+        Left out is ``commands``: those registers are written, never read.
+        Nothing notifies: a download is not a poll. The first call sets the
+        inverter up.
         """
         if self._polled is None:
             await self.async_setup()
@@ -211,4 +212,4 @@ class SolisHybrid:
             self.identity,
             *(getattr(self, name) for name in self._polled),
         ]
-        return await ComponentGroup(self._unit, components).async_read_raw()
+        return await ComponentGroup(self._unit, components).async_read_raw(notify=False)

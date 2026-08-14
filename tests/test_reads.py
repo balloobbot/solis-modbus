@@ -210,3 +210,31 @@ async def test_legacy_raw_dump_covers_the_setup_only_identity() -> None:
     dumped = {(space, address) for space, values in raw.items() for address in values}
     assert ("input", 3061) in dumped
     assert field_addresses([device.identity, *polled(device, report)]) <= dumped
+
+
+async def test_a_raw_dump_does_not_fire_listeners() -> None:
+    """A download refreshes the fields without looking like a poll."""
+    unit, device = build_hybrid_3_slot()
+    await device.async_update()
+    fired: list[str] = []
+    device.battery.add_update_listener(lambda: fired.append("battery"))
+    device.energy.add_update_listener(lambda: fired.append("energy"))
+
+    unit.input[33139] = 55
+    await device.async_read_raw()
+
+    assert fired == []
+    assert device.battery.battery_soc == 55  # but the values are fresh
+
+
+async def test_a_legacy_raw_dump_does_not_fire_listeners() -> None:
+    unit, device = build_legacy()
+    await device.async_update()
+    fired: list[str] = []
+    device.generation.add_update_listener(lambda: fired.append("generation"))
+
+    unit.input[3015] = 91
+    await device.async_read_raw()
+
+    assert fired == []
+    assert device.generation.power_generation_today == 9.1

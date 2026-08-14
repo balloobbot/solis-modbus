@@ -139,7 +139,9 @@ six-slot `schedule` covers three reads of 43707-43791, each failing as a unit.
 
 For an issue report, `async_read_raw()` dumps every register the inverter reads
 undecoded, keyed by address space and address. It covers the serial number as
-well, which only setup reads; the write-only command registers stay out.
+well, which only setup reads; the write-only command registers stay out. It
+fires no update listeners — a download is not a poll, though the fields it
+reads do refresh.
 
 ## Field names
 
