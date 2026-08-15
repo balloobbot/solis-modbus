@@ -145,6 +145,30 @@ well, which only setup reads; the write-only command registers stay out. It
 fires no update listeners — a download is not a poll, though the fields it
 reads do refresh.
 
+### Splitting the poll
+
+A full poll is 15 requests on a three-slot X1, 14 on a three-slot X3, 16 on a
+six-slot and 3 on the legacy map. Everything that only changes when something
+writes it already sits in a component of its own, so a consumer can give those
+their own, slower schedule and leave the rest where it is:
+
+| Component | Requests | Blocks |
+| --- | --- | --- |
+| `settings` | 3 | 43007+18, 43073+2, 43116+3 |
+| `schedule` (three-slot) | 1 | 43141+30 |
+| `schedule` (six-slot) | 3 | 43707+40, 43747+40, 43787+5 |
+| `special_settings` (three-slot) | 1 | 43249+1 |
+
+That is 5 requests of 15 on a three-slot X1, 5 of 14 on a three-slot X3 and 6 of
+16 on a six-slot. `clock` (33022+6) is a further one if you can live with the
+inverter's time being minutes old. The legacy map is read-only telemetry with no
+settings at all, so its 3 requests do not split.
+
+Nothing else is worth moving. The only configuration register outside those
+components is the storage-mode word read back at input 33132, and it rides
+inside the 33132+19 block the live battery readings pay for anyway — carving it
+out would add a request rather than save one, on all three hybrid variants.
+
 ## Field names
 
 Field names are the integration's entity keys, so a mapping lifted from there
