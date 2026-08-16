@@ -187,6 +187,22 @@ keeps working. Three deliberate departures:
 Home-Assistant-only metadata (icons, device classes, entity categories,
 translation keys, scan groups) is dropped.
 
+## Checking a real inverter
+
+`script/query.py` reads one inverter once and prints every value it has, which
+is the quickest way to see whether it is wired and addressed correctly:
+
+```bash
+uv run script/query.py 192.168.1.50 --unit 1 --framer rtu
+uv run script/query.py /dev/ttyUSB0 --transport serial --map legacy
+```
+
+`--map` picks the register map (`3slot`, `6slot` or `legacy`); one script covers
+all three, since only the class differs. The phase and MPPT count come from the
+serial number, and `--variant X1,MPPT4` overrides them for a model the prefix
+table has not caught up with. Components this variant does not serve are
+skipped, and the read count is printed at the end.
+
 ## Development
 
 ```bash
