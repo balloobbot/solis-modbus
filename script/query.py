@@ -39,7 +39,7 @@ from solis_modbus import (
 
 # The inverter is RS-485 RTU; over TCP it is reached through a gateway, which
 # presents it either transparently (rtu) or as native Modbus TCP (socket).
-CONNECTIONS = (("serial", "rtu"), ("tcp", "rtu"), ("tcp", "socket"))
+CONNECTIONS = (("tcp", "rtu"), ("tcp", "socket"), ("serial", "rtu"))
 
 MAPS: dict[str, type[SolisHybrid] | type[SolisLegacy3000]] = {
     "3slot": SolisHybrid3Slot,
