@@ -69,34 +69,88 @@ async def test_three_slot_x1_poll_is_correct() -> None:
     assert ("input", 33053) in covered
 
 
+_X1_READING_BLOCKS = [
+    ("input", 33022, 6),  # clock
+    ("input", 33029, 12),  # generation counters
+    ("input", 33049, 10),  # PV strings 1-2 and the total
+    ("input", 33073, 12),  # AC output
+    ("input", 33093, 3),  # temperature, frequency, status
+    # The inverter meter and the battery are separate components, so they
+    # are separate reads: pooling used to merge them into one 33126+25.
+    # Same 25 registers either way, one request more, one failure domain
+    # each — a refused battery block no longer blanks the meter.
+    ("input", 33126, 6),  # inverter meter, exactly 33126-33131
+    ("input", 33132, 19),  # battery, 33132-33150, bridging its two holes
+    ("input", 33161, 20),  # energy counters
+    ("input", 33206, 2),  # battery current limits (X1 only)
+    ("input", 33251, 36),  # external meter
+]
+_X1_SETTING_BLOCKS = [
+    ("holding", 43007, 18),  # settings
+    ("holding", 43073, 2),  # export limit switch and power
+    ("holding", 43116, 3),  # battery currents
+    ("holding", 43141, 30),  # the three time slots
+    ("holding", 43249, 1),  # special settings
+]
+
+
+def blocks(unit: MockModbusUnit) -> list[tuple[str, int, int]]:
+    """The reads recorded so far, as (space, address, count)."""
+    return [(e.register_type, e.address, e.count) for e in unit.read_events]
+
+
 async def test_three_slot_x1_poll_shape() -> None:
     unit, device = build_hybrid_3_slot()
     await device.async_update()
     unit.read_events.clear()
     await device.async_update()  # a steady-state poll: setup is already done
 
-    blocks = [(e.register_type, e.address, e.count) for e in unit.read_events]
-    assert blocks == [
-        ("input", 33022, 6),  # clock
-        ("input", 33029, 12),  # generation counters
-        ("input", 33049, 10),  # PV strings 1-2 and the total
-        ("input", 33073, 12),  # AC output
-        ("input", 33093, 3),  # temperature, frequency, status
-        # The inverter meter and the battery are separate components, so they
-        # are separate reads: pooling used to merge them into one 33126+25.
-        # Same 25 registers either way, one request more, one failure domain
-        # each — a refused battery block no longer blanks the meter.
-        ("input", 33126, 6),  # inverter meter, exactly 33126-33131
-        ("input", 33132, 19),  # battery, 33132-33150, bridging its two holes
-        ("input", 33161, 20),  # energy counters
-        ("input", 33206, 2),  # battery current limits (X1 only)
-        ("input", 33251, 36),  # external meter
-        ("holding", 43007, 18),  # settings
-        ("holding", 43073, 2),  # export limit switch and power
-        ("holding", 43116, 3),  # battery currents
-        ("holding", 43141, 30),  # the three time slots
-        ("holding", 43249, 1),  # special settings
-    ]
+    assert blocks(unit) == _X1_READING_BLOCKS + _X1_SETTING_BLOCKS
+
+
+async def test_readings_and_settings_poll_their_own_blocks() -> None:
+    """Neither method reads a register the other one owns.
+
+    The split falls out of the map: everything the inverter measures is in the
+    33xxx input space, everything it was told to do in the 43xxx holding space.
+    """
+    unit, device = build_hybrid_3_slot()
+    await device.async_update()
+
+    unit.read_events.clear()
+    readings = await device.async_update_readings()
+    assert blocks(unit) == _X1_READING_BLOCKS
+
+    unit.read_events.clear()
+    settings = await device.async_update_settings()
+    assert blocks(unit) == _X1_SETTING_BLOCKS
+
+    assert readings.updated == {
+        "clock",
+        "generation",
+        "pv",
+        "ac_output",
+        "status",
+        "inverter_meter",
+        "battery",
+        "energy",
+        "battery_current_limits",
+        "external_meter",
+    }
+    assert settings.updated == {"settings", "schedule", "special_settings"}
+
+
+async def test_the_legacy_map_has_no_settings_to_poll() -> None:
+    """It is input registers only, so a settings poll asks the inverter nothing."""
+    unit, device = build_legacy()
+    await device.async_update()
+
+    unit.read_events.clear()
+    report = await device.async_update_settings()
+
+    assert unit.read_events == []
+    assert report.complete
+    assert report.updated == set()
 
 
 async def test_three_slot_x3_mppt4_poll_is_correct() -> None:
@@ -160,8 +214,7 @@ async def test_legacy_poll_shape() -> None:
     unit.read_events.clear()
     await device.async_update()
 
-    blocks = [(e.address, e.count) for e in unit.read_events]
-    assert blocks == [
+    assert [(e.address, e.count) for e in unit.read_events] == [
         (3005, 16),  # power and the generation counters
         (3022, 8),  # four PV strings
         (3034, 10),  # AC output, temperature, frequency

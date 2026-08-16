@@ -49,11 +49,9 @@ from .variants import (
 if TYPE_CHECKING:
     from modbus_connection import ModbusUnit
 
-# Every shared component attribute a poll may refresh, in read order — which is
-# ascending register order, so a poll still walks the map front to back. Each
-# variant adds its own schedule attributes; identity is read once at setup and
-# commands are write-only, so neither is here.
-_POLLED = (
+# What the inverter measures: the 33xxx input map, in ascending register order,
+# so a poll still walks it front to back. identity is read once at setup.
+_READINGS = (
     "clock",
     "generation",
     "pv",
@@ -64,22 +62,31 @@ _POLLED = (
     "energy",
     "battery_current_limits",
     "external_meter",
-    "settings",
 )
+
+# What the inverter has been configured to do: the readable 43xxx holding map.
+# Each variant adds its own schedule attributes. Commands are write-only, so
+# they are not here either.
+_SETTINGS = ("settings",)
 
 
 class SolisHybrid:
     """A Solis hybrid inverter on the 33xxx/43xxx register map.
 
     Construct with a ``ModbusUnit``; the caller owns the connection. The first
-    ``async_update()`` reads the serial number, settles which variant this
-    inverter is, and builds the components that variant serves.
+    update reads the serial number, settles which variant this inverter is, and
+    builds the components that variant serves.
+
+    What the inverter measures and what it has been configured to do refresh
+    separately — ``async_update_readings()`` and ``async_update_settings()`` —
+    so a caller can poll the settings rarely, or on demand after writing one.
+    ``async_update()`` does both.
     """
 
     commands_class: ClassVar[type[Commands]] = Commands
     mode_enum: ClassVar[type[IntEnum]]
     schedule_polled: ClassVar[tuple[str, ...]]
-    """The variant's schedule attributes, polled after the shared ones."""
+    """The variant's schedule attributes, polled after the shared settings."""
 
     def __init__(self, unit: ModbusUnit, variant: Variant | None = None) -> None:
         self._unit = unit
@@ -102,7 +109,9 @@ class SolisHybrid:
         self.external_meter: ExternalMeter | None = None
         self.battery_current_limits: BatteryCurrentLimits | None = None
 
-        self._polled: list[str] | None = None
+        # The poll units of each update method; None until setup has run.
+        self._readings: list[str] | None = None
+        self._settings: list[str] | None = None
 
     @property
     def storage_mode(self) -> IntEnum | None:
@@ -160,47 +169,76 @@ class SolisHybrid:
             BatteryCurrentLimits(self._unit) if single_phase else None
         )
 
-        # Doubles as the setup marker: None means setup still has to run.
-        self._polled = [
+        # _readings doubles as the setup marker: None means setup has to run.
+        self._readings = [name for name in _READINGS if getattr(self, name) is not None]
+        self._settings = [
             name
-            for name in (*_POLLED, *self.schedule_polled)
+            for name in (*_SETTINGS, *self.schedule_polled)
             if getattr(self, name) is not None
         ]
 
+    async def async_update_readings(self) -> UpdateReport:
+        """Refresh what the inverter measures: the 33xxx input map.
+
+        The first call sets the inverter up.
+        """
+        if self._readings is None:
+            await self.async_setup()
+        assert self._readings is not None  # async_setup() builds it
+        return await self._async_poll(self._readings, UpdateReport(set(), {}))
+
+    async def async_update_settings(self) -> UpdateReport:
+        """Refresh what is configured: the readable 43xxx holding map.
+
+        These change when something writes them, not on their own, so a caller
+        that polls them at all polls them rarely — and reads them straight after
+        writing one. The first call sets the inverter up.
+        """
+        if self._settings is None:
+            await self.async_setup()
+        assert self._settings is not None  # async_setup() builds it
+        return await self._async_poll(self._settings, UpdateReport(set(), {}))
+
     async def async_update(self) -> UpdateReport:
-        """Refresh every component this variant serves, one at a time.
+        """Refresh readings and settings together, in one report.
+
+        For a caller that does not want to schedule the two apart.
+        """
+        report = await self.async_update_readings()
+        assert self._settings is not None  # the readings poll set the inverter up
+        return await self._async_poll(self._settings, report)
+
+    async def _async_poll(self, names: list[str], report: UpdateReport) -> UpdateReport:
+        """Read each component on its own, adding what happened to ``report``.
 
         Components are read independently, the way the integration reads its
         blocks: a component whose read fails keeps its previous values while the
-        rest still refresh. Listeners fire only after every component has been
-        tried, and only on the ones that refreshed. A failure of the link itself
-        raises ``ModbusConnectionError`` instead of reporting, and so does a
-        timeout before anything has answered: a silent inverter is not walked
-        component by component, paying a timeout for each.
+        rest still refresh. Listeners fire only after every component here has
+        been tried, and only on the ones that refreshed. A failure of the link
+        itself raises ``ModbusConnectionError`` instead of reporting, and so
+        does a timeout while ``report`` is still empty: nothing has answered
+        this cycle, and walking on would pay a timeout per component to learn
+        the same.
         """
-        if self._polled is None:
-            await self.async_setup()
-        assert self._polled is not None  # async_setup() builds it
-        updated: set[str] = set()
-        failed: dict[str, ModbusError] = {}
-        for name in self._polled:
+        for name in names:
             component: Component = getattr(self, name)
             try:
                 await component.async_update(notify=False)
             except ModbusConnectionError:
                 raise
             except ModbusTimeoutError as err:
-                if not updated and not failed:
+                if not report.updated and not report.failed:
                     raise  # nothing answered at all: assume the rest time out too
-                failed[name] = err
+                report.failed[name] = err
             except ModbusError as err:
-                failed[name] = err
+                report.failed[name] = err
             else:
-                updated.add(name)
-        for name in updated:
-            fresh: Component = getattr(self, name)
-            fresh.notify()
-        return UpdateReport(updated, failed)
+                report.updated.add(name)
+        for name in names:
+            if name in report.updated:
+                fresh: Component = getattr(self, name)
+                fresh.notify()
+        return report
 
     async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
         """Every register this inverter reads, undecoded — for diagnostics.
@@ -211,11 +249,11 @@ class SolisHybrid:
         Nothing notifies: a download is not a poll. The first call sets the
         inverter up.
         """
-        if self._polled is None:
+        if self._readings is None:
             await self.async_setup()
-        assert self._polled is not None  # async_setup() builds it
+        assert self._readings is not None and self._settings is not None
         components: list[Component] = [
             self.identity,
-            *(getattr(self, name) for name in self._polled),
+            *(getattr(self, name) for name in (*self._readings, *self._settings)),
         ]
         return await ComponentGroup(self._unit, components).async_read_raw(notify=False)

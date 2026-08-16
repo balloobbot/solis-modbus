@@ -39,12 +39,12 @@ async def test_a_failed_component_leaves_the_rest_fresh() -> None:
     assert device.battery.battery_voltage == before  # previous value kept
 
 
-async def test_listeners_fire_at_the_end_and_only_for_fresh_components() -> None:
+async def test_listeners_fire_at_the_end_of_the_poll_that_read_them() -> None:
     unit, device = build_hybrid_3_slot()
     await device.async_update()
     seen: list[int] = []
-    # energy is polled before external_meter and the schedule, so a listener
-    # firing mid-poll would see fewer reads than the poll's final count.
+    # energy is polled before external_meter, so a listener firing mid-poll
+    # would see fewer reads than the finished readings poll.
     device.energy.add_update_listener(lambda: seen.append(len(unit.read_events)))
     device.battery.add_update_listener(lambda: seen.append(-1))
 
@@ -54,8 +54,14 @@ async def test_listeners_fire_at_the_end_and_only_for_fresh_components() -> None
     unit.read_events.clear()
     await device.async_update()
 
-    # One notification, after every component was tried; none for the failure.
-    assert seen == [len(unit.read_events)]
+    # One notification, after every reading was tried; none for the failure.
+    # The settings poll that follows is its own, and does not hold it up.
+    settings_start = next(
+        i
+        for i, event in enumerate(unit.read_events)
+        if event.register_type == "holding"
+    )
+    assert seen == [settings_start]
 
 
 async def test_a_dead_link_raises_instead_of_reporting() -> None:
@@ -118,6 +124,33 @@ async def test_a_timeout_with_nothing_answered_is_fatal() -> None:
 
     # The first component is the probe: the poll gave up instead of walking on.
     assert len(unit.read_events) == 1
+
+
+async def test_a_settings_poll_on_a_silent_inverter_is_fatal_too() -> None:
+    """Each method starts its own report, so "nothing answered" means this poll."""
+    unit, device = build_hybrid_3_slot()
+    await device.async_update()
+
+    unit.fail_read(
+        43007, ModbusTimeoutError("inverter asleep"), register_type="holding"
+    )
+    unit.read_events.clear()
+    with pytest.raises(ModbusTimeoutError):
+        await device.async_update_settings()
+
+    assert len(unit.read_events) == 1
+
+
+async def test_a_settings_timeout_inside_a_full_poll_is_contained() -> None:
+    """The readings already answered, so the same failure only reports here."""
+    unit, device = build_hybrid_3_slot()
+    await device.async_update()
+
+    unit.fail_read(43007, ModbusTimeoutError("slow settings"), register_type="holding")
+    report = await device.async_update()
+
+    assert set(report.failed) == {"settings"}
+    assert "schedule" in report.updated
 
 
 async def test_a_refusal_on_the_first_component_is_still_contained() -> None:

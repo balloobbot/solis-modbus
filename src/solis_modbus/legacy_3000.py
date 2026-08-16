@@ -33,8 +33,9 @@ MAX_READ_SPAN = 48
 """Registers per read. The integration caps a legacy Solis block at 48."""
 
 # Every component attribute a poll refreshes, in read order. identity is read
-# once at setup and stays out.
-_POLLED = ("generation", "pv", "ac_output")
+# once at setup and stays out. All of it is measurement: this map has no
+# configuration registers, so there is nothing for a settings poll to read.
+_READINGS = ("generation", "pv", "ac_output")
 
 
 class LegacyInput(Component):
@@ -105,7 +106,12 @@ class LegacyThreePhaseAcOutput(LegacyAcOutput):
 
 
 class SolisLegacy3000:
-    """A Solis inverter that only serves the older 3000-block input map."""
+    """A Solis inverter that only serves the older 3000-block input map.
+
+    Same update methods as :class:`solis_modbus.SolisHybrid`, so a caller can
+    schedule either class the same way — but this map is measurement only, so
+    ``async_update_settings()`` has nothing to read and does nothing.
+    """
 
     def __init__(self, unit: ModbusUnit, variant: Variant | None = None) -> None:
         self._unit = unit
@@ -117,7 +123,7 @@ class SolisLegacy3000:
         self.pv = LegacyPvStrings(unit)
 
         self.ac_output: LegacyAcOutput | None = None
-        self._polled: list[str] | None = None
+        self._readings: list[str] | None = None
 
     async def async_setup(self) -> None:
         """Read the serial number and settle whether this is X1 or X3.
@@ -141,22 +147,23 @@ class SolisLegacy3000:
             else LegacyThreePhaseAcOutput(self._unit)
         )
         # Doubles as the setup marker: None means setup still has to run.
-        self._polled = [name for name in _POLLED if getattr(self, name) is not None]
+        self._readings = [name for name in _READINGS if getattr(self, name) is not None]
 
-    async def async_update(self) -> UpdateReport:
+    async def async_update_readings(self) -> UpdateReport:
         """Refresh every polled component, one at a time.
 
-        Same contract as :meth:`solis_modbus.SolisHybrid.async_update`: a failed
-        component keeps its previous values and is reported, listeners fire after
-        the whole poll and only for refreshed components, and a dead link raises
-        ``ModbusConnectionError`` — as does a timeout before anything answered.
+        Same contract as :meth:`solis_modbus.SolisHybrid.async_update_readings`:
+        a failed component keeps its previous values and is reported, listeners
+        fire after the whole poll and only for refreshed components, and a dead
+        link raises ``ModbusConnectionError`` — as does a timeout before
+        anything answered.
         """
-        if self._polled is None:
+        if self._readings is None:
             await self.async_setup()
-        assert self._polled is not None  # async_setup() builds it
+        assert self._readings is not None  # async_setup() builds it
         updated: set[str] = set()
         failed: dict[str, ModbusError] = {}
-        for name in self._polled:
+        for name in self._readings:
             component: Component = getattr(self, name)
             try:
                 await component.async_update(notify=False)
@@ -175,6 +182,18 @@ class SolisLegacy3000:
             fresh.notify()
         return UpdateReport(updated, failed)
 
+    async def async_update_settings(self) -> UpdateReport:
+        """Read nothing: this map has no configuration registers.
+
+        Here so a caller can schedule this class exactly like a hybrid, without
+        asking which one it is holding.
+        """
+        return UpdateReport(set(), {})
+
+    async def async_update(self) -> UpdateReport:
+        """Refresh everything this inverter serves, which is all measurement."""
+        return await self.async_update_readings()
+
     async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
         """Every register this inverter reads, undecoded — for diagnostics.
 
@@ -182,11 +201,11 @@ class SolisLegacy3000:
         components. Nothing notifies: a download is not a poll. The first call
         sets the inverter up.
         """
-        if self._polled is None:
+        if self._readings is None:
             await self.async_setup()
-        assert self._polled is not None  # async_setup() builds it
+        assert self._readings is not None  # async_setup() builds it
         components: list[Component] = [
             self.identity,
-            *(getattr(self, name) for name in self._polled),
+            *(getattr(self, name) for name in self._readings),
         ]
         return await ComponentGroup(self._unit, components).async_read_raw(notify=False)

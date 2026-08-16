@@ -19,10 +19,13 @@ inverter.
   the connection yourself, use RTU-over-TCP or plain TCP. Solis inverters and the
   usual RS485 gateways do not speak Modbus ASCII over TCP, and the integration's
   ASCII affordance is deliberately not carried over.
-- **Setup once, then poll.** The first `async_update()` reads the serial number,
-  settles which variant the inverter is, and builds only the components that
-  variant serves. Later polls read each of those components in turn. A setup
-  that fails leaves the inverter unset up, so the next poll retries it.
+- **Setup once, then poll.** The first update reads the serial number, settles
+  which variant the inverter is, and builds only the components that variant
+  serves. Later polls read each of those components in turn. A setup that fails
+  leaves the inverter unset up, so the next poll retries it.
+- **Measurements and settings refresh separately.** `async_update_readings()`
+  reads what the inverter measures, `async_update_settings()` what it has been
+  configured to do, and `async_update()` does both.
 - Reads are capped at the width the integration uses for Solis — 40 registers
   (48 on the legacy map). No readable address ranges are declared, because the
   integration does not know any: it forms blocks purely by that width, so gap
@@ -122,7 +125,7 @@ listeners, so a consumer can refresh or subscribe to just the part it shows.
 
 A poll reads each sub-system independently, the way the integration reads its
 blocks: one slow or refused block does not take the rest of the poll with it.
-`async_update()` returns an `UpdateReport` — a failed component keeps its
+Every update method returns an `UpdateReport` — a failed component keeps its
 previous values, does not notify its listeners, and is listed by attribute name
 with its error, while every other component refreshes and notifies once the
 whole poll is done. A dead link (`ModbusConnectionError`) raises, and so does a
@@ -135,9 +138,10 @@ for name, error in report.failed.items():
     print(f"{name} kept its previous values: {error}")
 ```
 
-Containment is per component, so a component's own registers are still
-all-or-nothing: `settings` covers three separate holding blocks, and the
-six-slot `schedule` covers three reads of 43707-43791, each failing as a unit.
+A report names only what the method it came from polls. Containment is per
+component, so a component's own registers are still all-or-nothing: `settings`
+covers three separate holding blocks, and the six-slot `schedule` covers three
+reads of 43707-43791, each failing as a unit.
 
 For an issue report, `async_read_raw()` dumps every register the inverter reads
 undecoded, keyed by address space and address. It covers the serial number as
@@ -145,12 +149,25 @@ well, which only setup reads; the write-only command registers stay out. It
 fires no update listeners — a download is not a poll, though the fields it
 reads do refresh.
 
-### Splitting the poll
+### Reading settings apart from measurements
 
-A full poll is 15 requests on a three-slot X1, 14 on a three-slot X3, 16 on a
-six-slot and 3 on the legacy map. Everything that only changes when something
-writes it already sits in a component of its own, so a consumer can give those
-their own, slower schedule and leave the rest where it is:
+The split falls out of the map. Everything the inverter measures is in the
+33xxx **input** space; everything it has been told to do is in the readable
+43xxx **holding** space, and changes only when something writes it. So the two
+are their own polls:
+
+```python
+await inverter.async_update_readings()  # every cycle
+await inverter.async_update_settings()  # rarely, and after a write
+
+await inverter.settings.write("battery_minimum_soc", 25)
+await inverter.async_update_settings()  # read back what took effect
+```
+
+A full poll is 15 requests on a three-slot X1, 14 on a three-slot X3 and 16 on a
+six-slot. The settings are 5, 5 and 6 of those — 54 registers of 180 on a
+three-slot X1, and 108 of 234 on a six-slot, where the extended schedule alone
+is 85:
 
 | Component | Requests | Blocks |
 | --- | --- | --- |
@@ -159,15 +176,17 @@ their own, slower schedule and leave the rest where it is:
 | `schedule` (six-slot) | 3 | 43707+40, 43747+40, 43787+5 |
 | `special_settings` (three-slot) | 1 | 43249+1 |
 
-That is 5 requests of 15 on a three-slot X1, 5 of 14 on a three-slot X3 and 6 of
-16 on a six-slot. `clock` (33022+6) is a further one if you can live with the
-inverter's time being minutes old. The legacy map is read-only telemetry with no
-settings at all, so its 3 requests do not split.
+Listeners fire at the end of the poll that read their component, so a settings
+poll does not hold up the measurements.
 
-Nothing else is worth moving. The only configuration register outside those
-components is the storage-mode word read back at input 33132, and it rides
-inside the 33132+19 block the live battery readings pay for anyway — carving it
-out would add a request rather than save one, on all three hybrid variants.
+`SolisLegacy3000` has both methods too, so a caller can schedule it exactly like
+a hybrid — but that map is read-only telemetry, so its `async_update_settings()`
+has nothing to read and asks the inverter nothing.
+
+One configuration register stays with the readings: the storage-mode word read
+back at input 33132 rides inside the 33132+19 block the live battery readings
+pay for anyway, so carving it out would add a request rather than save one.
+`clock` (33022+6) is a reading — the inverter's own RTC advances on its own.
 
 ## Field names
 
