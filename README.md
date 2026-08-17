@@ -179,9 +179,8 @@ is 85:
 Listeners fire at the end of the poll that read their component, so a settings
 poll does not hold up the measurements.
 
-`SolisLegacy3000` has both methods too, so a caller can schedule it exactly like
-a hybrid — but that map is read-only telemetry, so its `async_update_settings()`
-has nothing to read and asks the inverter nothing.
+`SolisLegacy3000` keeps a single `async_update()`: that map is read-only
+telemetry, so it has nothing to schedule apart.
 
 One configuration register stays with the readings: the storage-mode word read
 back at input 33132 rides inside the 33132+19 block the live battery readings

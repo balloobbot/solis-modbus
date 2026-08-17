@@ -140,17 +140,12 @@ async def test_readings_and_settings_poll_their_own_blocks() -> None:
     assert settings.updated == {"settings", "schedule", "special_settings"}
 
 
-async def test_the_legacy_map_has_no_settings_to_poll() -> None:
-    """It is input registers only, so a settings poll asks the inverter nothing."""
+async def test_the_legacy_map_has_one_poll() -> None:
+    """It is input registers only, so there is nothing to schedule apart."""
     unit, device = build_legacy()
     await device.async_update()
 
-    unit.read_events.clear()
-    report = await device.async_update_settings()
-
-    assert unit.read_events == []
-    assert report.complete
-    assert report.updated == set()
+    assert not hasattr(device, "async_update_settings")
 
 
 async def test_three_slot_x3_mppt4_poll_is_correct() -> None:

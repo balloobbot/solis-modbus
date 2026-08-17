@@ -108,9 +108,8 @@ class LegacyThreePhaseAcOutput(LegacyAcOutput):
 class SolisLegacy3000:
     """A Solis inverter that only serves the older 3000-block input map.
 
-    Same update methods as :class:`solis_modbus.SolisHybrid`, so a caller can
-    schedule either class the same way — but this map is measurement only, so
-    ``async_update_settings()`` has nothing to read and does nothing.
+    Measurement only, so one poll refreshes everything: unlike
+    :class:`solis_modbus.SolisHybrid`, there is nothing to schedule apart.
     """
 
     def __init__(self, unit: ModbusUnit, variant: Variant | None = None) -> None:
@@ -149,7 +148,7 @@ class SolisLegacy3000:
         # Doubles as the setup marker: None means setup still has to run.
         self._readings = [name for name in _READINGS if getattr(self, name) is not None]
 
-    async def async_update_readings(self) -> UpdateReport:
+    async def async_update(self) -> UpdateReport:
         """Refresh every polled component, one at a time.
 
         Same contract as :meth:`solis_modbus.SolisHybrid.async_update_readings`:
@@ -181,18 +180,6 @@ class SolisLegacy3000:
             fresh: Component = getattr(self, name)
             fresh.notify()
         return UpdateReport(updated, failed)
-
-    async def async_update_settings(self) -> UpdateReport:
-        """Read nothing: this map has no configuration registers.
-
-        Here so a caller can schedule this class exactly like a hybrid, without
-        asking which one it is holding.
-        """
-        return UpdateReport(set(), {})
-
-    async def async_update(self) -> UpdateReport:
-        """Refresh everything this inverter serves, which is all measurement."""
-        return await self.async_update_readings()
 
     async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
         """Every register this inverter reads, undecoded — for diagnostics.
