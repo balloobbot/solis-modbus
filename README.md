@@ -176,8 +176,9 @@ is 85:
 | `schedule` (six-slot) | 3 | 43707+40, 43747+40, 43787+5 |
 | `special_settings` (three-slot) | 1 | 43249+1 |
 
-Listeners fire at the end of the poll that read their component, so a settings
-poll does not hold up the measurements.
+A settings poll fires its own components' listeners when that call is done, so it
+does not hold up the measurements. `async_update()` is one cycle and one
+notification: nothing fires until both halves have been read.
 
 `SolisLegacy3000` keeps a single `async_update()`: that map is read-only
 telemetry, so it has nothing to schedule apart.
