@@ -185,7 +185,9 @@ class SolisHybrid:
         if self._readings is None:
             await self.async_setup()
         assert self._readings is not None  # async_setup() builds it
-        return await self._async_poll(self._readings, UpdateReport(set(), {}))
+        report = await self._async_poll(self._readings, UpdateReport(set(), {}))
+        self._notify(report)
+        return report
 
     async def async_update_settings(self) -> UpdateReport:
         """Refresh what is configured: the readable 43xxx holding map.
@@ -197,28 +199,34 @@ class SolisHybrid:
         if self._settings is None:
             await self.async_setup()
         assert self._settings is not None  # async_setup() builds it
-        return await self._async_poll(self._settings, UpdateReport(set(), {}))
+        report = await self._async_poll(self._settings, UpdateReport(set(), {}))
+        self._notify(report)
+        return report
 
     async def async_update(self) -> UpdateReport:
         """Refresh readings and settings together, in one report.
 
-        For a caller that does not want to schedule the two apart.
+        For a caller that does not want to schedule the two apart. The first
+        call sets the inverter up.
         """
-        report = await self.async_update_readings()
-        assert self._settings is not None  # the readings poll set the inverter up
-        return await self._async_poll(self._settings, report)
+        if self._readings is None:
+            await self.async_setup()
+        assert self._readings is not None and self._settings is not None
+        report = await self._async_poll(self._readings, UpdateReport(set(), {}))
+        await self._async_poll(self._settings, report)
+        self._notify(report)  # nothing fires until the whole cycle is done
+        return report
 
     async def _async_poll(self, names: list[str], report: UpdateReport) -> UpdateReport:
         """Read each component on its own, adding what happened to ``report``.
 
         Components are read independently, the way the integration reads its
         blocks: a component whose read fails keeps its previous values while the
-        rest still refresh. Listeners fire only after every component here has
-        been tried, and only on the ones that refreshed. A failure of the link
-        itself raises ``ModbusConnectionError`` instead of reporting, and so
-        does a timeout while ``report`` is still empty: nothing has answered
-        this cycle, and walking on would pay a timeout per component to learn
-        the same.
+        rest still refresh. Nothing notifies here: the caller decides when its
+        cycle is done. A failure of the link itself raises
+        ``ModbusConnectionError`` instead of reporting, and so does a timeout
+        while ``report`` is still empty: nothing has answered this cycle, and
+        walking on would pay a timeout per component to learn the same.
         """
         for name in names:
             component: Component = getattr(self, name)
@@ -234,11 +242,13 @@ class SolisHybrid:
                 report.failed[name] = err
             else:
                 report.updated.add(name)
-        for name in names:
-            if name in report.updated:
-                fresh: Component = getattr(self, name)
-                fresh.notify()
         return report
+
+    def _notify(self, report: UpdateReport) -> None:
+        """Fire the listeners of everything this update refreshed."""
+        for name in report.updated:
+            fresh: Component = getattr(self, name)
+            fresh.notify()
 
     async def async_read_raw(self) -> dict[str, dict[int, int | bool]]:
         """Every register this inverter reads, undecoded — for diagnostics.

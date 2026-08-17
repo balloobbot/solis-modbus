@@ -39,12 +39,12 @@ async def test_a_failed_component_leaves_the_rest_fresh() -> None:
     assert device.battery.battery_voltage == before  # previous value kept
 
 
-async def test_listeners_fire_at_the_end_of_the_poll_that_read_them() -> None:
+async def test_listeners_fire_at_the_end_and_only_for_fresh_components() -> None:
     unit, device = build_hybrid_3_slot()
     await device.async_update()
     seen: list[int] = []
-    # energy is polled before external_meter, so a listener firing mid-poll
-    # would see fewer reads than the finished readings poll.
+    # energy is polled before external_meter and the schedule, so a listener
+    # firing mid-poll would see fewer reads than the poll's final count.
     device.energy.add_update_listener(lambda: seen.append(len(unit.read_events)))
     device.battery.add_update_listener(lambda: seen.append(-1))
 
@@ -54,14 +54,38 @@ async def test_listeners_fire_at_the_end_of_the_poll_that_read_them() -> None:
     unit.read_events.clear()
     await device.async_update()
 
-    # One notification, after every reading was tried; none for the failure.
-    # The settings poll that follows is its own, and does not hold it up.
-    settings_start = next(
-        i
-        for i, event in enumerate(unit.read_events)
-        if event.register_type == "holding"
-    )
-    assert seen == [settings_start]
+    # One notification, after every component was tried; none for the failure.
+    assert seen == [len(unit.read_events)]
+
+
+async def test_a_settings_poll_notifies_its_own_components() -> None:
+    """Polling the settings alone still fires their listeners, and only theirs."""
+    unit, device = build_hybrid_3_slot()
+    await device.async_update()
+    seen: list[str] = []
+    device.schedule.add_update_listener(lambda: seen.append("schedule"))
+    device.energy.add_update_listener(lambda: seen.append("energy"))
+
+    await device.async_update_settings()
+
+    assert seen == ["schedule"]
+
+
+async def test_a_full_poll_notifies_each_component_once() -> None:
+    """The two phases share one report, so neither phase may fire it twice."""
+    unit, device = build_hybrid_3_slot()
+    await device.async_update()
+    readings: list[int] = []
+    settings: list[int] = []
+    device.energy.add_update_listener(lambda: readings.append(len(unit.read_events)))
+    device.schedule.add_update_listener(lambda: settings.append(len(unit.read_events)))
+
+    unit.read_events.clear()
+    await device.async_update()
+
+    total = len(unit.read_events)
+    assert readings == [total]
+    assert settings == [total]
 
 
 async def test_a_dead_link_raises_instead_of_reporting() -> None:
